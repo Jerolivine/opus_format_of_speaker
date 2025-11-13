@@ -4,7 +4,7 @@ fn encode_to_opus(
     pcm_data: Vec<f32>,
     sample_rate: u32,
     channels: Channels,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Create encoder
     let mut encoder = Encoder::new(sample_rate, channels, Application::Audio)?;
 
@@ -36,7 +36,7 @@ fn encode_to_opus(
         }
     }
 
-    Ok(())
+    Ok(encoded_frame)
 }
 
 fn main() -> anyhow::Result<()> {
