@@ -206,7 +206,7 @@ fn main() -> anyhow::Result<()> {
             audio_data.lock().unwrap().extend_from_slice(data);
         },
         |err| eprintln!("Stream error: {err}"),
-        None,
+        None,   carb
     )?; 
 
     stream.play()?;
