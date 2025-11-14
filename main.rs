@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     stream.play()?;
     std::thread::sleep(std::time::Duration::from_secs(10));
+    stream.stop()?;
 
     // let _encoded_len = encoder.encode_float(data, &mut opus_buf).unwrap();
 

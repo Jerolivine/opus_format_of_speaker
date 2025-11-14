@@ -48,6 +48,7 @@ fn main() -> anyhow::Result<()> {
 
     stream.play()?;
     std::thread::sleep(std::time::Duration::from_secs(10));
+    stream.pause()?;
 
     match encode_10s_pcm_to_opus(audio_data_c.lock().unwrap().to_vec()) {
         Ok(_) => println!("✓ Successfully created playable output.opus"),
@@ -91,44 +92,75 @@ where
     }
 }
 
+// pub fn encode_10s_pcm_to_opus(pcm: Vec<f32>) -> anyhow::Result<Vec<u8>> {
+//     let sample_rate = 48_000;
+//     let channels = Channels::Stereo;
+
+//     // Ensure exactly ~10 seconds of data
+//     let expected_samples = sample_rate * 10;
+//     if pcm.len() < expected_samples {
+//         anyhow::bail!(
+//             "PCM buffer too short: {} samples (expected {} for 10s)",
+//             pcm.len(),
+//             expected_samples
+//         );
+//     }
+
+//     let pcm = &pcm[..expected_samples]; // trim extra if longer
+
+//     let mut encoder = Encoder::new(audiopus::SampleRate::Hz48000, channels, Application::Audio)?;
+
+//     // 20ms Opus frames → 960 samples @ 48kHz
+//     let frame_size = 960;
+
+//     let mut packets = Vec::new();
+//     let mut offset = 0;
+//     let mut encoded_frame = vec![0u8; 4000];
+
+//     let mut writer = OpusFileWriter::new("output.opus", sample_rate as u32, channels as u8)?;
+
+//     while offset + frame_size <= pcm.len() {
+//         let frame = &pcm[offset..offset + frame_size];
+
+//         let packet = encoder.encode_float(frame, &mut encoded_frame)?;
+//         writer.write_audio_packet(&encoded_frame[..packet])?;
+//         packets.push(packet);
+
+//         offset += frame_size;
+//     }
+
+//     Ok(encoded_frame)
+// }
+
 pub fn encode_10s_pcm_to_opus(pcm: Vec<f32>) -> anyhow::Result<Vec<u8>> {
     let sample_rate = 48_000;
     let channels = Channels::Stereo;
-
-    // Ensure exactly ~10 seconds of data
-    let expected_samples = sample_rate * 10;
-    if pcm.len() < expected_samples {
-        anyhow::bail!(
-            "PCM buffer too short: {} samples (expected {} for 10s)",
-            pcm.len(),
-            expected_samples
-        );
-    }
-
-    let pcm = &pcm[..expected_samples]; // trim extra if longer
+    let frame_size = 960;
 
     let mut encoder = Encoder::new(audiopus::SampleRate::Hz48000, channels, Application::Audio)?;
 
-    // 20ms Opus frames → 960 samples @ 48kHz
-    let frame_size = 960;
-
-    let mut packets = Vec::new();
+    let mut writer = OpusFileWriter::new("output.opus", sample_rate, 2)?;
     let mut offset = 0;
-    let mut encoded_frame = vec![0u8; 4000];
+    let mut encoded = vec![0u8; 4000];
 
-    let mut writer = OpusFileWriter::new("output.opus", sample_rate as u32, channels as u8)?;
+    let mut opus_data: Vec<u8> = Vec::new(); // <-- collect packets here
 
     while offset + frame_size <= pcm.len() {
         let frame = &pcm[offset..offset + frame_size];
+        let packet_len = encoder.encode_float(frame, &mut encoded)?;
 
-        let packet = encoder.encode_float(frame, &mut encoded_frame)?;
-        writer.write_audio_packet(&encoded_frame[..packet])?;
-        packets.push(packet);
+        let packet = &encoded[..packet_len];
+        opus_data.extend_from_slice(packet); // <-- store actual Opus bytes
+        writer.write_audio_packet(packet)?; // <-- store in .opus container
 
         offset += frame_size;
     }
 
-    Ok(encoded_frame)
+    println!("opus_data length {}", opus_data.len());
+
+    writer.finalize()?; // finalize Ogg stream headers + EOS flag
+
+    Ok(opus_data) // <-- return the real encoded Opus
 }
 
 struct OpusFileWriter {
