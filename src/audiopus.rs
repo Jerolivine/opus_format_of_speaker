@@ -4,11 +4,132 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use audiopus::{Application, Channels, coder::Encoder};
 use cpal::{
     FromSample, Sample,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use opus::{Application, Channels, Encoder};
+
+fn main() -> anyhow::Result<()> {
+    let audio_data = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let audio_data_c = audio_data.clone();
+
+    let host = cpal::default_host();
+
+    // Get the default *output* device (speaker)
+    let device = host
+        .default_output_device()
+        .expect("no output device available");
+
+    // On Windows, output devices can be used in loopback mode to capture their playback.
+    let config = device.default_output_config()?.config();
+
+    println!("{:?}", config);
+
+    const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/recorded.wav");
+    println!("PATH {}", PATH);
+    let spec = wav_spec_from_config(&device.default_output_config().unwrap());
+    let writer = hound::WavWriter::create(PATH, spec)?;
+    let writer = Arc::new(Mutex::new(Some(writer)));
+    let writer_2 = writer.clone();
+
+    let stream = device.build_input_stream(
+        &config,
+        move |data: &[f32], _| {
+            // Encode float samples to Opus
+
+            write_input_data::<f32, f32>(data, &writer_2);
+
+            audio_data.lock().unwrap().extend_from_slice(data);
+        },
+        |err| eprintln!("Stream error: {err}"),
+        None,
+    )?;
+
+    stream.play()?;
+    std::thread::sleep(std::time::Duration::from_secs(10));
+
+    match encode_10s_pcm_to_opus(audio_data_c.lock().unwrap().to_vec()) {
+        Ok(_) => println!("✓ Successfully created playable output.opus"),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+
+    Ok(())
+}
+
+fn wav_spec_from_config(config: &cpal::SupportedStreamConfig) -> hound::WavSpec {
+    hound::WavSpec {
+        channels: config.channels() as _,
+        sample_rate: config.sample_rate().0 as _,
+        bits_per_sample: (config.sample_format().sample_size() * 8) as _,
+        sample_format: sample_format(config.sample_format()),
+    }
+}
+
+fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
+    if format.is_float() {
+        hound::SampleFormat::Float
+    } else {
+        hound::SampleFormat::Int
+    }
+}
+
+type WavWriterHandle = Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>;
+
+fn write_input_data<T, U>(input: &[T], writer: &WavWriterHandle)
+where
+    T: Sample,
+    U: Sample + hound::Sample + FromSample<T>,
+{
+    if let Ok(mut guard) = writer.try_lock() {
+        if let Some(writer) = guard.as_mut() {
+            for &sample in input.iter() {
+                let sample: U = U::from_sample(sample);
+                writer.write_sample(sample).ok();
+            }
+        }
+    }
+}
+
+pub fn encode_10s_pcm_to_opus(pcm: Vec<f32>) -> anyhow::Result<Vec<u8>> {
+    let sample_rate = 48_000;
+    let channels = Channels::Stereo;
+
+    // Ensure exactly ~10 seconds of data
+    let expected_samples = sample_rate * 10;
+    if pcm.len() < expected_samples {
+        anyhow::bail!(
+            "PCM buffer too short: {} samples (expected {} for 10s)",
+            pcm.len(),
+            expected_samples
+        );
+    }
+
+    let pcm = &pcm[..expected_samples]; // trim extra if longer
+
+    let mut encoder = Encoder::new(audiopus::SampleRate::Hz48000, channels, Application::Audio)?;
+
+    // 20ms Opus frames → 960 samples @ 48kHz
+    let frame_size = 960;
+
+    let mut packets = Vec::new();
+    let mut offset = 0;
+    let mut encoded_frame = vec![0u8; 4000];
+
+    let mut writer = OpusFileWriter::new("output.opus", sample_rate as u32, channels as u8)?;
+
+    while offset + frame_size <= pcm.len() {
+        let frame = &pcm[offset..offset + frame_size];
+
+        let packet = encoder.encode_float(frame, &mut encoded_frame)?;
+        writer.write_audio_packet(&encoded_frame[..packet])?;
+        packets.push(packet);
+
+        offset += frame_size;
+    }
+
+    Ok(encoded_frame)
+}
 
 struct OpusFileWriter {
     file: File,
@@ -32,8 +153,6 @@ impl OpusFileWriter {
                 _ => 960,
             },
         };
-
-
 
         // Write Opus identification header
         writer.write_id_header(sample_rate, channels)?;
@@ -129,137 +248,5 @@ impl OpusFileWriter {
             }
         }
         crc
-    }
-}
-
-fn encode_to_opus_file(
-    pcm_data: Vec<f32>,
-    sample_rate: u32,
-    channels: Channels,
-    output_path: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create encoder
-    let mut encoder = Encoder::new(sample_rate, channels, Application::Audio)?;
-
-    // Convert f32 to i16
-    let pcm_i16: Vec<i16> = pcm_data
-        .iter()
-        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-        .collect();
-
-    let frame_size = match sample_rate {
-        48000 => 960,
-        24000 => 480,
-        16000 => 320,
-        _ => 960,
-    };
-
-    let ch_count = match channels {
-        Channels::Mono => 1,
-        Channels::Stereo => 2,
-    };
-
-    let samples_per_frame = frame_size * ch_count;
-    let mut writer = OpusFileWriter::new(output_path, sample_rate, ch_count as u8)?;
-    let mut encoded_frame = vec![0u8; 4000];
-
-    // Encode and write frames
-    for chunk in pcm_i16.chunks(samples_per_frame) {
-        if chunk.len() == samples_per_frame {
-            let len = encoder.encode(chunk, &mut encoded_frame)?;
-            writer.write_audio_packet(&encoded_frame[..len])?;
-        }
-    }
-
-    writer.finalize()?;
-    Ok(())
-}
-
-fn main() -> anyhow::Result<()> {
-    let audio_data = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let audio_data_c = audio_data.clone();
-
-    let host = cpal::default_host();
-
-    // Get the default *output* device (speaker)
-    let device = host
-        .default_output_device()
-        .expect("no output device available");
-
-    // On Windows, output devices can be used in loopback mode to capture their playback.
-    let config = device.default_output_config()?.config();
-
-    println!("{:?}", config);
-
-    const PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/recorded.wav");
-    println!("PATH {}", PATH);
-    let spec = wav_spec_from_config(&device.default_output_config().unwrap());
-    let writer = hound::WavWriter::create(PATH, spec)?;
-    let writer = Arc::new(Mutex::new(Some(writer)));
-    let writer_2 = writer.clone();
-
-    let stream = device.build_input_stream(
-        &config,
-        move |data: &[f32], _| {
-            // Encode float samples to Opus
-
-            write_input_data::<f32, f32>(data, &writer_2);
-
-            audio_data.lock().unwrap().extend_from_slice(data);
-        },
-        |err| eprintln!("Stream error: {err}"),
-        None,   carb
-    )?; 
-
-    stream.play()?;
-    std::thread::sleep(std::time::Duration::from_secs(10));
-
-    match encode_to_opus_file(
-        audio_data_c.lock().unwrap().to_vec(),
-        config.sample_rate.0 as u32,
-        match config.channels {
-            1 => Channels::Mono,
-            _ => Channels::Stereo,
-        },
-        "output.opus",
-    ) {
-        Ok(_) => println!("✓ Successfully created playable output.opus"),
-        Err(e) => eprintln!("Error: {}", e),
-    }
-
-    Ok(())
-}
-
-fn wav_spec_from_config(config: &cpal::SupportedStreamConfig) -> hound::WavSpec {
-    hound::WavSpec {
-        channels: config.channels() as _,
-        sample_rate: config.sample_rate().0 as _,
-        bits_per_sample: (config.sample_format().sample_size() * 8) as _,
-        sample_format: sample_format(config.sample_format()),
-    }
-}
-
-fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
-    if format.is_float() {
-        hound::SampleFormat::Float
-    } else {
-        hound::SampleFormat::Int
-    }
-}
-
-type WavWriterHandle = Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>;
-
-fn write_input_data<T, U>(input: &[T], writer: &WavWriterHandle)
-where
-    T: Sample,
-    U: Sample + hound::Sample + FromSample<T>,
-{
-    if let Ok(mut guard) = writer.try_lock() {
-        if let Some(writer) = guard.as_mut() {
-            for &sample in input.iter() {
-                let sample: U = U::from_sample(sample);
-                writer.write_sample(sample).ok();
-            }
-        }
     }
 }

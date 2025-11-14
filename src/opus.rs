@@ -33,8 +33,6 @@ impl OpusFileWriter {
             },
         };
 
-
-
         // Write Opus identification header
         writer.write_id_header(sample_rate, channels)?;
 
@@ -135,11 +133,15 @@ impl OpusFileWriter {
 fn encode_to_opus_file(
     pcm_data: Vec<f32>,
     sample_rate: u32,
-    channels: Channels,
+    channels: usize,
     output_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create encoder
-    let mut encoder = Encoder::new(sample_rate, channels, Application::Audio)?;
+    let opus_channel = match channels {
+        1 => Channels::Mono,
+        _ => Channels::Stereo,
+    };
+
+    let mut encoder = Encoder::new(sample_rate, opus_channel, Application::Audio)?;
 
     // Convert f32 to i16
     let pcm_i16: Vec<i16> = pcm_data
@@ -154,13 +156,8 @@ fn encode_to_opus_file(
         _ => 960,
     };
 
-    let ch_count = match channels {
-        Channels::Mono => 1,
-        Channels::Stereo => 2,
-    };
-
-    let samples_per_frame = frame_size * ch_count;
-    let mut writer = OpusFileWriter::new(output_path, sample_rate, ch_count as u8)?;
+    let samples_per_frame = frame_size * channels;
+    let mut writer = OpusFileWriter::new(output_path, sample_rate, channels as u8)?;
     let mut encoded_frame = vec![0u8; 4000];
 
     // Encode and write frames
@@ -208,8 +205,8 @@ fn main() -> anyhow::Result<()> {
             audio_data.lock().unwrap().extend_from_slice(data);
         },
         |err| eprintln!("Stream error: {err}"),
-        None,   carb
-    )?; 
+        None,
+    )?;
 
     stream.play()?;
     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -217,10 +214,7 @@ fn main() -> anyhow::Result<()> {
     match encode_to_opus_file(
         audio_data_c.lock().unwrap().to_vec(),
         config.sample_rate.0 as u32,
-        match config.channels {
-            1 => Channels::Mono,
-            _ => Channels::Stereo,
-        },
+        2,
         "output.opus",
     ) {
         Ok(_) => println!("✓ Successfully created playable output.opus"),
